@@ -1,0 +1,18 @@
+# Terraform
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate.lock.info
+*.tfplan
+tfplan
+
+# Node
+app/node_modules/
+app/npm-debug.log*
+
+# Generated manifests (created by deploy.sh, never committed)
+k8s/*_templated.yaml
+
+# Local env
+.env
+*.env.local

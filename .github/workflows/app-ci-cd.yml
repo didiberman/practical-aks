@@ -1,0 +1,81 @@
+name: "Application CI/CD + MLOps SecOps"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'k8s/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'k8s/**'
+
+jobs:
+  prompt-validation-tests:
+    name: "MLOps: Run Prompt Validation Tests"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          cd app
+          npm install
+
+      - name: Run prompt tests
+        run: |
+          cd app
+          npm test
+
+  secops-manifest-scan:
+    name: "SecOps: K8s Manifest Lint & Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy Vulnerability Scanner (K8s Config)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          hide-progress: false
+          exit-code: '1' # Break build if misconfigurations are found
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'
+          scan-ref: 'k8s/'
+
+  build-and-scan-image:
+    name: "Build & SecOps: Container Image Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Local Container Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          load: true # Load the image into the Docker daemon local cache
+          tags: akslearning.azurecr.io/aks-learning-app:latest
+
+      - name: Run Trivy Vulnerability Scanner (Container Image)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'akslearning.azurecr.io/aks-learning-app:latest'
+          format: 'table'
+          exit-code: '1' # Fail the pipeline on High/Critical vulnerabilities
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'

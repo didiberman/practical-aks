@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: llm-service-sa
+  namespace: default
+  annotations:
+    # This matches the federated credential setup in Terraform
+    azure.workload.identity/client-id: "<APP_IDENTITY_CLIENT_ID>"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aks-learning-app
+  namespace: default
+  labels:
+    app: aks-learning-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aks-learning-app
+  template:
+    metadata:
+      labels:
+        app: aks-learning-app
+        # This label tells the AKS webhook to inject the Workload Identity credentials token volume
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: llm-service-sa
+      containers:
+      - name: web-app
+        image: akslearning.azurecr.io/aks-learning-app:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+        
+        # Environment variables for Azure Key Vault & LLM configuration
+        env:
+        - name: KEY_VAULT_URI
+          value: "<KEY_VAULT_URI>"
+        - name: GEMINI_API_KEY_SECRET_NAME
+          value: "gemini-api-key"
+        - name: MODEL_NAME
+          value: "gemini-2.5-flash"
+        
+        # Security Context
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+
+        # Health monitoring
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+        # Resource bounds
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
