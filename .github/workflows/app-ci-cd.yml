@@ -14,11 +14,28 @@ on:
       - 'app/**'
       - 'k8s/**'
 
+# Minimum permissions by default — each job grants only what it needs.
+# This limits what a compromised action can do with the GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   prompt-validation-tests:
     name: "MLOps: Run Prompt Validation Tests"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
+      # harden-runner installs a network agent on the runner before any other
+      # step. It enforces an egress allowlist so that even a compromised action
+      # cannot phone home to an attacker's C2 server — the connection is blocked
+      # and logged. This is the external security layer that would have stopped
+      # the March 2026 Trivy supply chain attack (exfil to scan.aquasecurtiy.org).
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit # set to 'block' with allowed-endpoints once you've baselined traffic
+
       - name: Checkout Code
         uses: actions/checkout@v4
 
@@ -40,16 +57,28 @@ jobs:
   secops-manifest-scan:
     name: "SecOps: K8s Manifest Lint & Scan"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # Pinned to the verified-safe commit SHA for v0.35.0.
+      # The March 2026 attack force-pushed 76/77 trivy-action tags to malicious
+      # commits using @master or floating version refs. Pinning to a SHA makes
+      # tag-poisoning attacks ineffective — the SHA is immutable.
+      # Safe version confirmed by Aqua Security advisory GHSA-69fq-xp46-6x23.
       - name: Run Trivy Vulnerability Scanner (K8s Config)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           scan-type: 'config'
           hide-progress: false
-          exit-code: '1' # Break build if misconfigurations are found
+          exit-code: '1'
           ignore-unfixed: true
           severity: 'HIGH,CRITICAL'
           scan-ref: 'k8s/'
@@ -57,7 +86,14 @@ jobs:
   build-and-scan-image:
     name: "Build & SecOps: Container Image Scan"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - name: Checkout Code
         uses: actions/checkout@v4
 
@@ -68,14 +104,14 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./app
-          load: true # Load the image into the Docker daemon local cache
+          load: true
           tags: akslearning.azurecr.io/aks-learning-app:latest
 
       - name: Run Trivy Vulnerability Scanner (Container Image)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: 'akslearning.azurecr.io/aks-learning-app:latest'
           format: 'table'
-          exit-code: '1' # Fail the pipeline on High/Critical vulnerabilities
+          exit-code: '1'
           ignore-unfixed: true
           severity: 'HIGH,CRITICAL'

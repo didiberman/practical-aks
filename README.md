@@ -6,6 +6,7 @@
 [![App CI/CD](https://img.shields.io/badge/App-CI%2FCD%20%2B%20SecOps-2088FF?logo=github-actions)](https://github.com/features/actions)
 [![AKS](https://img.shields.io/badge/Azure-AKS-0078D4?logo=microsoft-azure)](https://learn.microsoft.com/azure/aks/)
 [![Trivy](https://img.shields.io/badge/Security-Trivy%20Scanned-1904DA?logo=aqua)](https://trivy.dev/)
+[![StepSecurity](https://img.shields.io/badge/Supply%20Chain-Harden--Runner-orange?logo=github)](https://github.com/step-security/harden-runner)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
@@ -383,6 +384,103 @@ push to main (app/** or k8s/**)
 
 ---
 
+## Supply Chain Security: The Trivy Attack and Why It Matters Here
+
+> **This project was directly affected.** Our original workflow used `aquasecurity/trivy-action@master` — the exact reference that was weaponised in the March 2026 attack. This section explains what happened and what we changed.
+
+### What Happened (March 19, 2026)
+
+Attackers compromised Aqua Security's GitHub credentials and force-pushed **76 of 77 version tags** in `aquasecurity/trivy-action` — including `@master` — to point at malicious commits. The payload injected a credential stealer into `entrypoint.sh` that ran *before* the legitimate Trivy scan. Pipelines looked completely normal. Logs showed a clean scan. Meanwhile, CI/CD secrets (cloud tokens, GitHub tokens, SSH keys) were being encrypted and exfiltrated to `scan.aquasecurtiy.org` — a typosquatted domain designed to blend into network logs.
+
+Over 1,000 enterprise environments were hit. The stolen credentials were later used in ransomware extortion.
+
+```
+Before the fix — our workflow:             What that line actually ran on March 19:
+
+uses: aquasecurity/trivy-action@master     → malicious commit
+                                             ├── entrypoint.sh (patched)
+                                             │   └── steal secrets, encrypt, exfil
+                                             └── run real trivy (looks normal)
+```
+
+**The root cause was a floating reference.** Tags and branch names are mutable pointers — anyone with write access to the repo can silently redirect them. `@master`, `@v3`, `@latest` are all the same class of risk.
+
+### What We Changed
+
+**Fix 1: Pin to a commit SHA, not a tag.**
+
+```yaml
+# Before (vulnerable):
+uses: aquasecurity/trivy-action@master
+
+# After (safe — SHA is immutable, cannot be redirected):
+uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+```
+
+A commit SHA cannot be force-pushed. Once a commit exists, its SHA is cryptographically bound to its content. This is the first line of defence.
+
+**Fix 2: Add `step-security/harden-runner` as the external security layer.**
+
+SHA pinning stops *known-bad* references. But it doesn't help if you're running a SHA you think is good and it isn't (orphaned commits, submodule tricks). `harden-runner` is the second layer: it installs a network agent on the runner *before any other step runs* and enforces an egress allowlist.
+
+```yaml
+- name: Harden Runner
+  uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+  with:
+    egress-policy: audit   # → 'block' with allowed-endpoints once you've baselined
+```
+
+In `audit` mode it logs all outbound connections. Switch to `block` mode with an explicit allowlist and a compromised action physically cannot reach an attacker's server — the syscall is intercepted at the kernel level before the packet leaves the runner.
+
+Had `harden-runner` with `block` mode been in place on March 19, the connection to `scan.aquasecurtiy.org` would have been blocked and logged. The exfiltration would have failed even though the malicious code ran.
+
+**Fix 3: Minimum `permissions` at the workflow level.**
+
+```yaml
+permissions:
+  contents: read  # workflow-level default
+```
+
+If a compromised action tries to push code back to your repository using the `GITHUB_TOKEN`, this stops it. The token simply doesn't have write permission.
+
+### The Layered Defence Model
+
+```
+Attack surface          Our control               What it stops
+─────────────────────────────────────────────────────────────────────
+Mutable tag reference   SHA pinning               Tag/branch hijacking
+Unknown-bad SHA         harden-runner (block)     C2 callbacks, exfil
+Token abuse             permissions: read          Repo write-back
+Privileged runner       No extra capabilities      Lateral movement
+```
+
+No single control is complete. SHA pinning didn't stop orphaned-commit tricks. `harden-runner` had its own DoH bypass in the community tier. Minimum permissions don't stop data exfiltration. That's why all three are in the workflow together.
+
+### Practical Next Steps
+
+To move from `audit` to `block` mode:
+
+1. Run the pipeline once in `audit` mode
+2. Check the StepSecurity dashboard for observed egress endpoints
+3. Add them to `allowed-endpoints` in the workflow
+4. Switch `egress-policy` to `block`
+
+```yaml
+- name: Harden Runner
+  uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+  with:
+    egress-policy: block
+    allowed-endpoints: >
+      registry.npmjs.org:443
+      ghcr.io:443
+      github.com:443
+      api.github.com:443
+      ghcr.io:443
+      objects.githubusercontent.com:443
+```
+
+---
+
 ## Activating the Full GitOps Pipeline
 
 The `plan_and_apply` job in `tf-ci-cd.yml` is ready to uncomment. To enable it:
@@ -511,22 +609,35 @@ aks/
 
 ---
 
-## Security Checklist
+## DevSecOps Checklist
 
-Every item on this list is implemented in the project — trace each one back to a specific file:
+Every control here is implemented and traceable to a specific file. Each is mapped to the class of attack it addresses.
 
-- [x] **No long-lived credentials** — Workload Identity + OIDC everywhere (`main.tf` lines 116–123)
-- [x] **Secrets in Key Vault, not env vars** — `app/index.js` `getApiKey()`
-- [x] **RBAC on Key Vault** — `enable_rbac_authorization = true` (`main.tf` line 91)
-- [x] **ACR admin disabled** — `admin_enabled = false` (`main.tf` line 132)
-- [x] **Non-root containers** — `USER node` in Dockerfile, `runAsNonRoot: true` in deployment
-- [x] **Read-only filesystem** — `readOnlyRootFilesystem: true` in deployment
-- [x] **All capabilities dropped** — `capabilities.drop: [ALL]` in deployment
-- [x] **Resource limits set** — prevents noisy-neighbour CPU/memory issues
-- [x] **K8s manifests scanned** — Trivy config scan in CI (`app-ci-cd.yml`)
-- [x] **Container image scanned** — Trivy image scan in CI on every build
-- [x] **Azure Network Policies** — `network_policy = "azure"` in AKS network profile
-- [x] **Minimum RBAC scope** — each identity has exactly one role on exactly one resource
+### Infrastructure & Identity
+
+- [x] **No long-lived credentials** — Workload Identity + OIDC federation (`main.tf:116–123`). Addresses: credential theft attacks like the CircleCI breach (2023), where stored tokens were exfiltrated from CI memory.
+- [x] **Secrets in Key Vault, not env vars** — `app/index.js` `getApiKey()`. Addresses: env var leakage via debug logs, crash dumps, and `kubectl describe pod` output.
+- [x] **RBAC on Key Vault** — `enable_rbac_authorization = true` (`main.tf:91`). Addresses: legacy access-policy misconfiguration that granted overly broad secret access.
+- [x] **ACR admin disabled** — `admin_enabled = false` (`main.tf:132`). Addresses: shared static credentials for container registries — a common lateral movement path.
+- [x] **Minimum RBAC scope** — each identity has exactly one role on exactly one resource. Addresses: blast radius of any single compromised identity.
+- [x] **Azure Network Policies** — `network_policy = "azure"` in AKS network profile. Addresses: unrestricted pod-to-pod traffic enabling lateral movement once a pod is compromised.
+
+### Container & Runtime
+
+- [x] **Non-root containers** — `USER node` in Dockerfile, `runAsNonRoot: true` in deployment. Addresses: container breakout attacks that require root to exploit kernel vulnerabilities.
+- [x] **Read-only filesystem** — `readOnlyRootFilesystem: true` in deployment. Addresses: malware that writes persistence mechanisms or modifies binaries at runtime.
+- [x] **All Linux capabilities dropped** — `capabilities.drop: [ALL]` in deployment. Addresses: privilege escalation via capabilities like `NET_RAW`, `SYS_ADMIN` — a common container escape vector.
+- [x] **Resource limits set** — CPU and memory bounds in deployment. Addresses: resource exhaustion attacks and noisy-neighbour interference.
+- [x] **Multi-stage Docker build** — production image contains no build tools or dev dependencies. Reduces CVE surface area in the final image.
+
+### CI/CD & Supply Chain
+
+- [x] **GitHub Actions pinned to commit SHAs** — `trivy-action@57a97c7e...` and `harden-runner@9af89fc7...`. Addresses: the March 2026 Trivy supply chain attack, where 76 mutable tags were force-pushed to malicious commits (CVE-2026-33634 / GHSA-69fq-xp46-6x23).
+- [x] **`step-security/harden-runner` on every job** — network egress agent installed before any other step. Addresses: C2 callbacks from compromised actions — would have blocked exfiltration to `scan.aquasecurtiy.org` in the Trivy attack even if the malicious code ran.
+- [x] **Minimum `permissions: contents: read`** — workflow-level GITHUB_TOKEN restriction. Addresses: compromised actions using the token to push malicious code back to the repository (the `tj-actions/changed-files` attack pattern, 2025).
+- [x] **K8s manifests scanned by Trivy config** — catches misconfigurations before they reach the cluster. Addresses: privilege escalation via missing `securityContext`, privileged containers, host path mounts.
+- [x] **Container image scanned on every build** — Trivy image scan with `exit-code: 1` on HIGH/CRITICAL. Addresses: shipping known-vulnerable OS packages or Node dependencies to production.
+- [x] **MLOps prompt validation tests** — prompt format is tested in CI before any image is built. Addresses: prompt injection regressions reaching production silently.
 
 ---
 
