@@ -33,21 +33,14 @@ spec:
         - containerPort: 8080
           name: http
         
-        # Environment variables for Azure Key Vault & LLM configuration
+        # Environment variables for Azure OpenAI configuration
         env:
-        - name: KEY_VAULT_URI
-          value: "{{ .Values.keyVaultUri }}"
-        - name: GEMINI_API_KEY_SECRET_NAME
-          value: "gemini-api-key"
-        - name: MODEL_NAME
-          value: "gemini-2.5-flash"
-        {{- if .Values.geminiApiKey }}
-        - name: GEMINI_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: gemini-api-key-secret
-              key: api-key
-        {{- end }}
+        - name: AZURE_OPENAI_ENDPOINT
+          value: "{{ .Values.azureOpenAI.endpoint }}"
+        - name: AZURE_OPENAI_DEPLOYMENT
+          value: "{{ .Values.azureOpenAI.deployment }}"
+        - name: AZURE_OPENAI_API_VERSION
+          value: "{{ .Values.azureOpenAI.apiVersion }}"
         
         # Security Context
         securityContext:

@@ -7,8 +7,9 @@ image:
 
 # These values will be dynamically injected by Terraform / ArgoCD or can be overridden manually
 appIdentityClientId: ""
-keyVaultUri: ""
 acrLoginServer: "akslearning.azurecr.io"
 
-# For local development / testing without Azure Key Vault
-geminiApiKey: ""
+azureOpenAI:
+  endpoint: ""
+  deployment: "gpt-4o-mini"
+  apiVersion: "2024-10-21"

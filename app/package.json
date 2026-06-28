@@ -9,8 +9,6 @@
   },
   "dependencies": {
     "@azure/identity": "^4.2.1",
-    "@azure/keyvault-secrets": "^4.8.0",
-    "@google/genai": "^2.10.0",
     "express": "^4.19.2"
   },
   "devDependencies": {

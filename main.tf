@@ -79,17 +79,23 @@ resource "azurerm_kubernetes_cluster" "aks" {
   ]
 }
 
-# 5. Key Vault and Security Configuration
-data "azurerm_client_config" "current" {}
+# 5. Managed Identity for the Application Pod
+resource "azurerm_user_assigned_identity" "app_identity" {
+  name                = "${var.resource_prefix}-app-identity"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}
 
-resource "azurerm_key_vault" "kv" {
-  name                        = "${var.resource_prefix}-kv"
-  location                    = azurerm_resource_group.rg.location
-  resource_group_name         = azurerm_resource_group.rg.name
-  tenant_id                   = data.azurerm_client_config.current.tenant_id
-  sku_name                    = "standard"
-  enable_rbac_authorization   = true # Use modern Azure RBAC instead of legacy access policies
-  purge_protection_enabled    = false
+# 6. Azure OpenAI account and model deployment
+resource "azurerm_cognitive_account" "openai" {
+  name                          = "${var.resource_prefix}-openai"
+  location                      = azurerm_resource_group.rg.location
+  resource_group_name           = azurerm_resource_group.rg.name
+  kind                          = "OpenAI"
+  sku_name                      = "S0"
+  custom_subdomain_name         = "${var.resource_prefix}-openai"
+  local_auth_enabled            = false
+  public_network_access_enabled = true
 
   tags = {
     Environment = "Learning"
@@ -97,17 +103,26 @@ resource "azurerm_key_vault" "kv" {
   }
 }
 
-# 6. Managed Identity for the Application Pod
-resource "azurerm_user_assigned_identity" "app_identity" {
-  name                = "${var.resource_prefix}-app-identity"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+resource "azurerm_cognitive_deployment" "chat" {
+  name                 = var.azure_openai_deployment_name
+  cognitive_account_id = azurerm_cognitive_account.openai.id
+
+  model {
+    format  = "OpenAI"
+    name    = var.azure_openai_model_name
+    version = var.azure_openai_model_version
+  }
+
+  scale {
+    type     = "Standard"
+    capacity = 1
+  }
 }
 
-# 7. Role Assignment: Grant Key Vault Secrets User to App Identity
-resource "azurerm_role_assignment" "app_kv_secrets_user" {
-  scope                = azurerm_key_vault.kv.id
-  role_definition_name = "Key Vault Secrets User"
+# 7. Role Assignment: Grant inference access to the App Identity
+resource "azurerm_role_assignment" "app_openai_user" {
+  scope                = azurerm_cognitive_account.openai.id
+  role_definition_name = "Cognitive Services OpenAI User"
   principal_id         = azurerm_user_assigned_identity.app_identity.principal_id
 }
 
@@ -197,8 +212,16 @@ resource "helm_release" "argocd_apps" {
                   value = azurerm_user_assigned_identity.app_identity.client_id
                 },
                 {
-                  name  = "keyVaultUri"
-                  value = azurerm_key_vault.kv.vault_uri
+                  name  = "azureOpenAI.endpoint"
+                  value = azurerm_cognitive_account.openai.endpoint
+                },
+                {
+                  name  = "azureOpenAI.deployment"
+                  value = var.azure_openai_deployment_name
+                },
+                {
+                  name  = "azureOpenAI.apiVersion"
+                  value = var.azure_openai_api_version
                 },
                 {
                   name  = "acrLoginServer"
@@ -225,4 +248,3 @@ resource "helm_release" "argocd_apps" {
 
   depends_on = [helm_release.argocd]
 }
-

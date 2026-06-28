@@ -23,7 +23,7 @@ By the time you've worked through this repo, you'll understand how real teams bu
 | `.github/workflows/tf-ci-cd.yml` | Gating infra changes with automated validation |
 | `.github/workflows/app-ci-cd.yml` | MLOps + SecOps in a single pipeline |
 | `app/Dockerfile` | Multi-stage hardened container builds |
-| `app/index.js` | Secure secret retrieval via Workload Identity |
+| `app/index.js` | Keyless Azure OpenAI inference via Workload Identity |
 | `k8s/deployment.yaml` | Security contexts, health probes, resource bounds |
 | `k8s/service.yaml` | ClusterIP + future ingress patterns |
 | `deploy.sh` | Wiring Terraform outputs into K8s manifests |
@@ -57,11 +57,11 @@ By the time you've worked through this repo, you'll understand how real teams bu
 │  │  └──────────────┘             │  ┌──────────────────┐  │   │  │
 │  │                               │  │  systempool      │  │   │  │
 │  │  ┌──────────────┐             │  │  2x D2s_v5       │  │   │  │
-│  │  │  Key Vault   │  Workload   │  │  AzureLinux      │  │   │  │
-│  │  │  (Standard)  │◄────────────│  │                  │  │   │  │
+│  │  │ Azure OpenAI │  Workload   │  │  AzureLinux      │  │   │  │
+│  │  │  Account     │◄────────────│  │                  │  │   │  │
 │  │  │              │  Identity   │  │  ┌────────────┐  │  │   │  │
-│  │  │  gemini-api  │  OIDC fed.  │  │  │ Pod        │  │  │   │  │
-│  │  │  -key secret │             │  │  │ (non-root) │  │  │   │  │
+│  │  │  chat model  │  OIDC fed.  │  │  │ Pod        │  │  │   │  │
+│  │  │  deployment  │             │  │  │ (non-root) │  │  │   │  │
 │  │  └──────────────┘             │  │  └────────────┘  │  │   │  │
 │  │                               │  └──────────────────┘  │   │  │
 │  │  ┌──────────────┐             │                        │   │  │
@@ -73,7 +73,7 @@ By the time you've worked through this repo, you'll understand how real teams bu
 │  │                                                              │  │
 │  │  ┌───────────────────────┐  ┌─────────────────────────────┐ │  │
 │  │  │  AKS Control Plane    │  │  App Managed Identity       │ │  │
-│  │  │  User-Assigned        │  │  → KV Secrets User          │ │  │
+│  │  │  User-Assigned        │  │  → OpenAI User              │ │  │
 │  │  │  Managed Identity     │  │  → Federated Credential     │ │  │
 │  │  └───────────────────────┘  └─────────────────────────────┘ │  │
 │  └──────────────────────────────────────────────────────────────┘  │
@@ -91,7 +91,7 @@ Cloud Kubernetes gets expensive fast. This project makes deliberate choices to k
 | `Standard_D2s_v5` (2 vCPU, 8 GiB) | ~$140/mo for 2 nodes | Burstable enough for LLM proxy workloads |
 | `AzureLinux` OS SKU | Smaller image, faster boot | Fewer CVEs, smaller attack surface |
 | `ACR Standard` SKU | ~$20/mo vs $50+ for Premium | Geo-replication not needed for a single region |
-| `Key Vault Standard` SKU | ~$0.03/10k ops | HSM not required for learning |
+| Azure OpenAI `S0` account | Usage-based | No key management; model cost depends on tokens and quota |
 | `node_count = 2` | Minimum for HA | Two nodes means pod disruption budget works |
 | Azure CNI Overlay | No IP exhaustion tax | Pods get virtual IPs, not VNet IPs — scales cheaply |
 | No public load balancer (ClusterIP) | $0 for the LB | Internal only; use port-forward or add ingress later |
@@ -116,8 +116,7 @@ az account set --subscription "<YOUR_SUBSCRIPTION_ID>"
 ```
 
 You'll also need:
-- A [Gemini API key](https://aistudio.google.com/apikey) (free tier is sufficient for learning)
-- An Azure subscription with permission to create resource groups, assign roles, and register the `Microsoft.ContainerService` provider
+- An Azure subscription with permission to create resource groups, assign roles, register the `Microsoft.ContainerService` and `Microsoft.CognitiveServices` providers, and use Azure OpenAI quota in your selected region
 
 ---
 
@@ -130,13 +129,7 @@ git clone https://github.com/<you>/aks.git && cd aks
 # 2. Optionally override defaults in variables.tf, then provision everything
 ./deploy.sh
 
-# 3. Upload your Gemini API key to Key Vault (emitted by deploy.sh)
-az keyvault secret set \
-  --vault-name "<KV_NAME>" \
-  --name "gemini-api-key" \
-  --value "<YOUR_GEMINI_KEY>"
-
-# 4. Test the deployed service
+# 3. Test the deployed service
 kubectl port-forward service/aks-learning-app 8080:80
 
 curl -X POST http://localhost:8080/api/generate \
@@ -144,7 +137,15 @@ curl -X POST http://localhost:8080/api/generate \
   -d '{"prompt": "explain workload identity in one sentence"}'
 ```
 
-> **What `deploy.sh` does**: runs `terraform apply`, reads all outputs, logs into ACR, builds and pushes the Docker image, fetches kubeconfig, substitutes template placeholders in the K8s manifests, and runs `kubectl apply`. One script, zero manual steps.
+To prove the pod can assume an Azure identity before it calls inference, inspect the safe token summary endpoint:
+
+```bash
+curl -s http://localhost:8080/api/azure-identity | jq
+```
+
+For a guided walkthrough, see [`labs/01-azure-role-from-pod.md`](labs/01-azure-role-from-pod.md).
+
+> **What `deploy.sh` does**: runs `terraform apply`, reads all outputs, builds and pushes the Docker image with Azure Container Registry Tasks, fetches kubeconfig, and deploys the Helm chart with the Terraform-produced identity and Azure OpenAI values. One script, zero manual steps.
 
 ---
 
@@ -154,17 +155,18 @@ To test the application locally without incurring any Azure cloud costs, you can
 
 We have provided an automated local deployment script [deploy-local.sh](file:///Users/yadid/documents/github/aks/deploy-local.sh) that:
 1. Verifies your Docker daemon is active.
-2. Prompts you for your `GEMINI_API_KEY` (if not already set in your environment).
+2. Accepts Azure OpenAI endpoint/deployment settings from environment variables.
 3. Provisions a local `kind` cluster named `aks-local` (if it does not already exist).
 4. Builds the container image locally.
 5. Loads the image directly into the `kind` cluster (eliminating the need for a container registry).
-6. Installs or upgrades the application using **Helm** with the local configurations and your API key injected as a Kubernetes secret (bypassing Azure Key Vault for local development).
+6. Installs or upgrades the application using **Helm** with local image settings. Kind does not provide AKS Workload Identity, so local inference needs a separate Azure credential source or a real AKS deployment.
 
 ### Run Local Deployment
 
 ```bash
-# Set your Gemini API key (optional, can also be provided interactively)
-export GEMINI_API_KEY="your_api_key_here"
+# Optional: point the local pod at an existing Azure OpenAI account
+export AZURE_OPENAI_ENDPOINT="https://<account>.openai.azure.com"
+export AZURE_OPENAI_DEPLOYMENT="gpt-4o-mini"
 
 # Execute the local deployment script
 ./deploy-local.sh
@@ -189,6 +191,55 @@ To clean up and delete the local Kind cluster when you are done:
 ```bash
 kind delete cluster --name aks-local
 ```
+
+---
+
+## Exercise: Prove Workload Identity From Inside The Pod
+
+After `./deploy.sh` succeeds against real AKS, run this from your terminal:
+
+```bash
+kubectl get pods -l app=aks-learning-app
+kubectl exec deploy/aks-learning-app -- printenv | grep -E 'AZURE_|APPLICATION'
+```
+
+Now call Azure OpenAI directly from inside the container. This uses the same projected service-account token and managed identity that the app uses:
+
+```bash
+kubectl exec deploy/aks-learning-app -- node -e '
+const { DefaultAzureCredential } = require("@azure/identity");
+
+(async () => {
+  const endpoint = process.env.AZURE_OPENAI_ENDPOINT.replace(/\/+$/, "");
+  const deployment = process.env.AZURE_OPENAI_DEPLOYMENT;
+  const apiVersion = process.env.AZURE_OPENAI_API_VERSION;
+  const credential = new DefaultAzureCredential();
+  const token = await credential.getToken("https://cognitiveservices.azure.com/.default");
+
+  const response = await fetch(`${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/chat/completions?api-version=${apiVersion}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token.token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      messages: [
+        { role: "user", content: "In one sentence, explain AKS Workload Identity." }
+      ]
+    })
+  });
+
+  const body = await response.json();
+  if (!response.ok) throw new Error(JSON.stringify(body));
+  console.log(body.choices[0].message.content);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+'
+```
+
+If that works, the pod is not using an API key. It is exchanging its Kubernetes service-account token for a Microsoft Entra ID token and using Azure RBAC to call Azure OpenAI.
 
 ---
 
@@ -228,7 +279,7 @@ This project uses **three different identities**, each with the minimum permissi
 │─────────────────────────────────────────────────────────│
 │  AKS Control Plane    Network Contrib.  aks-subnet only  │
 │  Kubelet (AKS)        AcrPull           ACR only         │
-│  App Pod              KV Secrets User   Key Vault only   │
+│  App Pod              OpenAI User       Azure OpenAI only│
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -251,8 +302,8 @@ This is the most architecturally interesting part of the project.
                                                 │
                                                 ▼
                                      ┌──────────────────────┐
-                                     │  Key Vault           │
-                                     │  (KV Secrets User)   │
+                                     │  Azure OpenAI        │
+                                     │  (OpenAI User)       │
                                      └──────────────────────┘
 ```
 
@@ -270,30 +321,22 @@ resource "azurerm_federated_identity_credential" "app_federated_credential" {
 }
 ```
 
-**The result**: the pod never receives a password, API key, or certificate. It gets a short-lived Kubernetes token, exchanges it for an Azure token, and calls Key Vault. Nothing to rotate. Nothing to leak.
+**The result**: the pod never receives a password, API key, or certificate. It gets a short-lived Kubernetes token, exchanges it for an Azure token, and calls Azure OpenAI. Nothing to rotate. Nothing to leak.
 
 ---
 
 ## Deep Dive: The Application (`app/`)
 
-The Node.js service demonstrates the **correct pattern** for reading secrets in a cloud-native app.
+The Node.js service demonstrates the **correct pattern** for keyless Azure service calls from a cloud-native app.
 
-### Secret Resolution Order
+### Token Resolution
 
 ```javascript
-async function getApiKey() {
-  // 1. Local dev: read from env var (fast iteration)
-  if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
-
-  // 2. Production: DefaultAzureCredential picks up the Workload Identity
-  //    token volume injected by the AKS webhook automatically
-  const credential = new DefaultAzureCredential();
-  const client = new SecretClient(keyVaultUri, credential);
-  return (await client.getSecret(secretName)).value;
-}
+const credential = new DefaultAzureCredential();
+const token = await credential.getToken("https://cognitiveservices.azure.com/.default");
 ```
 
-`DefaultAzureCredential` tries a chain of credential sources. Inside AKS with Workload Identity enabled, it automatically finds the projected token volume — no configuration required. Locally it falls through to `az login` credentials or env vars.
+`DefaultAzureCredential` tries a chain of credential sources. Inside AKS with Workload Identity enabled, it automatically finds the projected service-account token volume injected by the AKS webhook. Locally, a container does not inherit your host `az login`; use the real AKS deployment for the cleanest keyless path.
 
 ### Multi-Stage Docker Build
 
@@ -531,7 +574,7 @@ This project uses a GitOps workflow to manage application deployments. **ArgoCD*
 
 1. **ArgoCD Server:** Installed via the `argo-cd` Helm chart into the `argocd` namespace.
 2. **ArgoCD Application Configuration:** Deployed via the `argocd-apps` Helm chart. It configures ArgoCD to sync the application state with the `k8s/chart` directory in this GitHub repository (`https://github.com/didiberman/practical-aks.git`).
-3. **Dynamic Value Injection:** Since we cannot hardcode cluster-specific outputs (like Key Vault URI or Managed Identity Client ID) in Git, Terraform automatically injects them as Helm parameters in the ArgoCD Application definition.
+3. **Dynamic Value Injection:** Since we cannot hardcode cluster-specific outputs (like the Azure OpenAI endpoint or Managed Identity Client ID) in Git, Terraform automatically injects them as Helm parameters in the ArgoCD Application definition.
 
 ### Accessing ArgoCD
 To open the ArgoCD dashboard:
@@ -590,7 +633,7 @@ Ideas for taking this further, ordered by difficulty:
 | Add user node pool | taint/toleration, system vs user pools |
 | Add KEDA for event-driven scale | Scale-to-zero, Azure Service Bus triggers |
 | Add Azure Monitor + Prometheus | `--enable-azure-monitor-metrics`, Grafana |
-| Swap Gemini for Azure OpenAI | Same Workload Identity pattern, different SDK |
+| Add Azure AI Foundry model routing | Same Workload Identity pattern, broader model catalog |
 | Add multi-environment (dev/prod) | Terraform workspaces or separate state files |
 
 ---
@@ -602,7 +645,7 @@ Ideas for taking this further, ordered by difficulty:
 terraform destroy
 ```
 
-**Note**: The Key Vault has `purge_protection_enabled = false` intentionally. This means it can be fully deleted (including soft-deleted state) without waiting the default 90-day purge window — useful for a learning environment where you provision and destroy frequently.
+**Note**: Azure OpenAI model deployment can fail if the selected region does not have quota for the configured model/version. Override `azure_region`, `azure_openai_model_name`, and `azure_openai_model_version` in Terraform if your subscription requires a different combination.
 
 ---
 
@@ -616,7 +659,7 @@ aks/
 │       └── app-ci-cd.yml       # MLOps tests + K8s config scan + image build + CVE scan
 ├── app/
 │   ├── Dockerfile              # Multi-stage, non-root, Alpine
-│   ├── index.js                # Express LLM proxy, Workload Identity secret fetch
+│   ├── index.js                # Express LLM proxy, keyless Azure OpenAI calls
 │   ├── package.json
 │   ├── prompts/
 │   │   └── system_prompt.txt   # Versioned system prompt (MLOps pattern)
@@ -631,7 +674,7 @@ aks/
 │   └── service.yaml            # (Deprecated) Static service manifest
 ├── main.tf                     # Azure resources, Helm providers, ArgoCD setup
 ├── variables.tf                # Parameterised inputs
-├── outputs.tf                  # Cluster name, KV URI, ACR server, etc.
+├── outputs.tf                  # Cluster name, Azure OpenAI endpoint, ACR server, etc.
 ├── versions.tf                 # Provider pinning
 └── deploy.sh                   # End-to-end provisioning + Helm deploy script
 ```
@@ -644,10 +687,10 @@ Every control here is implemented and traceable to a specific file. Each is mapp
 
 ### Infrastructure & Identity
 
-- [x] **No long-lived credentials** — Workload Identity + OIDC federation (`main.tf:116–123`). Addresses: credential theft attacks like the CircleCI breach (2023), where stored tokens were exfiltrated from CI memory.
-- [x] **Secrets in Key Vault, not env vars** — `app/index.js` `getApiKey()`. Addresses: env var leakage via debug logs, crash dumps, and `kubectl describe pod` output.
-- [x] **RBAC on Key Vault** — `enable_rbac_authorization = true` (`main.tf:91`). Addresses: legacy access-policy misconfiguration that granted overly broad secret access.
-- [x] **ACR admin disabled** — `admin_enabled = false` (`main.tf:132`). Addresses: shared static credentials for container registries — a common lateral movement path.
+- [x] **No long-lived credentials** — Workload Identity + OIDC federation (`main.tf`). Addresses: credential theft attacks like the CircleCI breach (2023), where stored tokens were exfiltrated from CI memory.
+- [x] **No model API keys in pods** — `app/index.js` gets an Entra ID token through `DefaultAzureCredential`. Addresses: env var leakage via debug logs, crash dumps, and `kubectl describe pod` output.
+- [x] **RBAC on Azure OpenAI** — `Cognitive Services OpenAI User` is scoped to the OpenAI account (`main.tf`). Addresses: overly broad inference access.
+- [x] **ACR admin disabled** — `admin_enabled = false` (`main.tf`). Addresses: shared static credentials for container registries — a common lateral movement path.
 - [x] **Minimum RBAC scope** — each identity has exactly one role on exactly one resource. Addresses: blast radius of any single compromised identity.
 - [x] **Azure Network Policies** — `network_policy = "azure"` in AKS network profile. Addresses: unrestricted pod-to-pod traffic enabling lateral movement once a pod is compromised.
 

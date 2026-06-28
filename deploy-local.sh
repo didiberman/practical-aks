@@ -14,16 +14,9 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-# Retrieve or prompt for GEMINI_API_KEY
-if [ -z "$GEMINI_API_KEY" ]; then
-  echo "Warning: GEMINI_API_KEY environment variable is not set."
-  echo "You can set it via: export GEMINI_API_KEY=\"your_key\""
-  echo "Or enter it now (press Enter to skip and configure later):"
-  read -r -s -p "Gemini API Key: " INPUT_KEY
-  echo ""
-  if [ -n "$INPUT_KEY" ]; then
-    GEMINI_API_KEY="$INPUT_KEY"
-  fi
+if [ -z "$AZURE_OPENAI_ENDPOINT" ]; then
+  echo "Warning: AZURE_OPENAI_ENDPOINT is not set. LLM calls will fail until you provide an endpoint."
+  echo "For real AKS deployments, Terraform injects this value and Workload Identity supplies auth."
 fi
 
 echo "=== 2. Creating/Verifying Kind Cluster ==="
@@ -50,20 +43,18 @@ kind load docker-image "${IMAGE_NAME}:${IMAGE_TAG}" --name "$CLUSTER_NAME"
 
 echo "=== 5. Deploying via Helm ==="
 # Install or upgrade Helm release
-if [ -n "$GEMINI_API_KEY" ]; then
-  echo "Deploying with local Gemini API Key..."
-  helm upgrade --install "$IMAGE_NAME" ./k8s/chart \
-    --namespace "$NAMESPACE" \
-    --set image.tag="${IMAGE_TAG}" \
-    --set acrLoginServer="" \
-    --set geminiApiKey="${GEMINI_API_KEY}"
-else
-  echo "Deploying without API key. Note: LLM features will fail until you provide a key."
-  helm upgrade --install "$IMAGE_NAME" ./k8s/chart \
-    --namespace "$NAMESPACE" \
-    --set image.tag="${IMAGE_TAG}" \
-    --set acrLoginServer=""
-fi
+echo "Deploying with Azure OpenAI configuration. Kind does not provide AKS Workload Identity."
+HELM_ARGS=(
+  "$IMAGE_NAME" ./k8s/chart
+  --namespace "$NAMESPACE"
+  --set image.tag="${IMAGE_TAG}"
+  --set acrLoginServer=""
+  --set azureOpenAI.endpoint="${AZURE_OPENAI_ENDPOINT:-}"
+  --set azureOpenAI.deployment="${AZURE_OPENAI_DEPLOYMENT:-gpt-4o-mini}"
+  --set azureOpenAI.apiVersion="${AZURE_OPENAI_API_VERSION:-2024-10-21}"
+)
+
+helm upgrade --install "${HELM_ARGS[@]}"
 
 echo "=== 6. Local Deployment Complete! ==="
 echo ""
@@ -74,7 +65,10 @@ echo ""
 echo "2. In another terminal, query the local API endpoint:"
 echo "   curl -X POST http://localhost:8080/api/generate \\"
 echo "     -H 'Content-Type: application/json' \\"
-echo "     -d '\"prompt\":\"explain workload identity in 1 sentence\"}'"
+echo "     -d '{\"prompt\":\"explain workload identity in 1 sentence\"}'"
+echo ""
+echo "Note: local Kind pods do not receive AKS Workload Identity tokens. For local inference, provide"
+echo "Azure environment credentials to the pod or test against the real AKS deployment."
 echo ""
 echo "To tear down the cluster later, run:"
 echo "   kind delete cluster --name ${CLUSTER_NAME}"
