@@ -1,0 +1,135 @@
+name: App CI/CD
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "k8s/chart/**"
+      - ".github/workflows/app-ci-cd.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - "k8s/chart/**"
+      - ".github/workflows/app-ci-cd.yml"
+
+permissions:
+  contents: read
+
+env:
+  RESOURCE_PREFIX: ${{ vars.RESOURCE_PREFIX || 'aks-learn' }}
+  IMAGE_REPOSITORY: aks-learning-app
+
+jobs:
+  test:
+    name: Test app and chart
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Run tests
+        working-directory: app
+        run: npm test
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint Helm chart
+        run: helm lint ./k8s/chart
+
+  deploy:
+    name: Build, push, and deploy
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: write
+      id-token: write
+
+    concurrency:
+      group: app-deploy-main
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Azure deployment values
+        id: azure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          resource_group="${RESOURCE_PREFIX}-rg"
+          acr_name="${RESOURCE_PREFIX//-/}acr"
+
+          acr_login_server="$(az acr show \
+            --name "$acr_name" \
+            --resource-group "$resource_group" \
+            --query loginServer \
+            --output tsv)"
+
+          {
+            echo "resource-group=$resource_group"
+            echo "acr-name=$acr_name"
+            echo "acr-login-server=$acr_login_server"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Login to ACR
+        run: az acr login --name "${{ steps.azure.outputs.acr-name }}"
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: |
+            ${{ steps.azure.outputs.acr-login-server }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.azure.outputs.acr-login-server }}/${{ env.IMAGE_REPOSITORY }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Update Helm image tag in Git
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          perl -0pi -e 's/(image:\n\s+repository: aks-learning-app\n\s+tag: ).*/${1}'"${GITHUB_SHA}"'/' k8s/chart/values.yaml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- k8s/chart/values.yaml; then
+            echo "Helm image tag is already ${GITHUB_SHA}."
+            exit 0
+          fi
+
+          git add k8s/chart/values.yaml
+          git commit -m "Deploy app image ${GITHUB_SHA} [skip ci]"
+          git push

@@ -47,3 +47,23 @@ output "acr_login_server" {
   description = "The login server URI of the Azure Container Registry"
   value       = azurerm_container_registry.acr.login_server
 }
+
+output "github_actions_client_id" {
+  description = "The client ID GitHub Actions uses with Azure OIDC to deploy the app"
+  value       = azurerm_user_assigned_identity.github_actions_identity.client_id
+}
+
+output "github_actions_tenant_id" {
+  description = "The tenant ID GitHub Actions uses with Azure OIDC"
+  value       = azurerm_user_assigned_identity.github_actions_identity.tenant_id
+}
+
+output "github_actions_subscription_id" {
+  description = "The subscription ID GitHub Actions deploys into"
+  value       = data.azurerm_client_config.current.subscription_id
+}
+
+output "github_actions_repository_subject" {
+  description = "The GitHub OIDC subject trusted by the deployment identity"
+  value       = azurerm_federated_identity_credential.github_actions_main.subject
+}

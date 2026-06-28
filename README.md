@@ -149,6 +149,55 @@ For a guided walkthrough, see [`labs/01-azure-role-from-pod.md`](labs/01-azure-r
 
 ---
 
+## GitHub Actions App CI/CD
+
+This repo includes an app delivery pipeline in `.github/workflows/app-ci-cd.yml`.
+
+On pull requests it:
+
+- Installs Node dependencies.
+- Runs the Jest tests.
+- Lints the Helm chart.
+
+On pushes to `main` it:
+
+- Logs into Azure using GitHub OIDC.
+- Builds the app container.
+- Pushes two image tags to ACR: `latest` and the Git commit SHA.
+- Commits `image.tag=<commit-sha>` into `k8s/chart/values.yaml`.
+- Lets ArgoCD reconcile the Git-tracked Helm chart into AKS.
+
+### One-time GitHub setup
+
+Terraform creates a dedicated user-assigned managed identity for GitHub Actions and trusts only this repository's `main` branch:
+
+```hcl
+subject = "repo:<owner>/<repo>:ref:refs/heads/main"
+```
+
+If your repository is not `didiberman/practical-aks`, override this before applying:
+
+```bash
+terraform apply \
+  -var='github_repository=<owner>/<repo>' \
+  -var='github_actions_branch=main'
+```
+
+Then configure these GitHub repository variables from the Terraform outputs:
+
+```bash
+gh variable set AZURE_CLIENT_ID --body "$(terraform output -raw github_actions_client_id)"
+gh variable set AZURE_TENANT_ID --body "$(terraform output -raw github_actions_tenant_id)"
+gh variable set AZURE_SUBSCRIPTION_ID --body "$(terraform output -raw github_actions_subscription_id)"
+gh variable set RESOURCE_PREFIX --body "$(terraform output -raw resource_group_name | sed 's/-rg$//')"
+```
+
+In GitHub, also allow workflow write access under **Settings -> Actions -> General -> Workflow permissions -> Read and write permissions**. If `main` is protected, allow GitHub Actions to push deployment commits or switch the workflow to open a deployment PR instead.
+
+No Azure client secret is required. The workflow uses a short-lived OIDC token from GitHub and exchanges it for the managed identity Terraform created.
+
+---
+
 ## Local Development & Testing (Zero Cost via Kind)
 
 To test the application locally without incurring any Azure cloud costs, you can deploy the stack on a local Kubernetes cluster using **Kind (Kubernetes in Docker)**. 

@@ -3,6 +3,8 @@ resource "azurerm_resource_group" "rg" {
   location = var.azure_region
 }
 
+data "azurerm_client_config" "current" {}
+
 # 1. Network Resources
 resource "azurerm_virtual_network" "vnet" {
   name                = "${var.resource_prefix}-vnet"
@@ -154,7 +156,35 @@ resource "azurerm_role_assignment" "aks_acr_pull" {
   skip_service_principal_aad_check = true
 }
 
-# 11. Kubernetes and Helm Providers Configuration
+# 11. Managed Identity for GitHub Actions app deployments
+resource "azurerm_user_assigned_identity" "github_actions_identity" {
+  name                = "${var.resource_prefix}-github-actions-identity"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}
+
+resource "azurerm_federated_identity_credential" "github_actions_main" {
+  name                = "${var.resource_prefix}-github-actions-main"
+  resource_group_name = azurerm_resource_group.rg.name
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = "https://token.actions.githubusercontent.com"
+  parent_id           = azurerm_user_assigned_identity.github_actions_identity.id
+  subject             = "repo:${var.github_repository}:ref:refs/heads/${var.github_actions_branch}"
+}
+
+resource "azurerm_role_assignment" "github_actions_acr_push" {
+  scope                = azurerm_container_registry.acr.id
+  role_definition_name = "AcrPush"
+  principal_id         = azurerm_user_assigned_identity.github_actions_identity.principal_id
+}
+
+resource "azurerm_role_assignment" "github_actions_reader" {
+  scope                = azurerm_resource_group.rg.id
+  role_definition_name = "Reader"
+  principal_id         = azurerm_user_assigned_identity.github_actions_identity.principal_id
+}
+
+# 12. Kubernetes and Helm Providers Configuration
 provider "kubernetes" {
   host                   = azurerm_kubernetes_cluster.aks.kube_config.0.host
   client_certificate     = base64decode(azurerm_kubernetes_cluster.aks.kube_config.0.client_certificate)
@@ -171,7 +201,7 @@ provider "helm" {
   }
 }
 
-# 12. Bootstrap ArgoCD via Helm
+# 13. Bootstrap ArgoCD via Helm
 resource "helm_release" "argocd" {
   name             = "argocd"
   repository       = "https://argoproj.github.io/argo-helm"
@@ -186,7 +216,7 @@ resource "helm_release" "argocd" {
   }
 }
 
-# 13. Deploy the application via ArgoCD Apps Helm chart
+# 14. Deploy the application via ArgoCD Apps Helm chart
 resource "helm_release" "argocd_apps" {
   name             = "argocd-apps"
   repository       = "https://argoproj.github.io/argo-helm"
