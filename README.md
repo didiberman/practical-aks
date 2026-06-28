@@ -148,6 +148,50 @@ curl -X POST http://localhost:8080/api/generate \
 
 ---
 
+## Local Development & Testing (Zero Cost via Kind)
+
+To test the application locally without incurring any Azure cloud costs, you can deploy the stack on a local Kubernetes cluster using **Kind (Kubernetes in Docker)**. 
+
+We have provided an automated local deployment script [deploy-local.sh](file:///Users/yadid/documents/github/aks/deploy-local.sh) that:
+1. Verifies your Docker daemon is active.
+2. Prompts you for your `GEMINI_API_KEY` (if not already set in your environment).
+3. Provisions a local `kind` cluster named `aks-local` (if it does not already exist).
+4. Builds the container image locally.
+5. Loads the image directly into the `kind` cluster (eliminating the need for a container registry).
+6. Installs or upgrades the application using **Helm** with the local configurations and your API key injected as a Kubernetes secret (bypassing Azure Key Vault for local development).
+
+### Run Local Deployment
+
+```bash
+# Set your Gemini API key (optional, can also be provided interactively)
+export GEMINI_API_KEY="your_api_key_here"
+
+# Execute the local deployment script
+./deploy-local.sh
+```
+
+### Test the Local App
+
+1. Forward the local Kubernetes service port to your host machine:
+   ```bash
+   kubectl port-forward service/aks-learning-app 8080:80
+   ```
+2. Send a query to the API:
+   ```bash
+   curl -X POST http://localhost:8080/api/generate \
+     -H 'Content-Type: application/json' \
+     -d '{"prompt": "explain workload identity in one sentence"}'
+   ```
+
+### Tear Down Local Cluster
+
+To clean up and delete the local Kind cluster when you are done:
+```bash
+kind delete cluster --name aks-local
+```
+
+---
+
 ## Deep Dive: Infrastructure (`main.tf`)
 
 The Terraform file provisions resources in a deliberate order. Understanding the dependency graph is the first lesson.

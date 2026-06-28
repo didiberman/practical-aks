@@ -9,3 +9,6 @@ image:
 appIdentityClientId: ""
 keyVaultUri: ""
 acrLoginServer: "akslearning.azurecr.io"
+
+# For local development / testing without Azure Key Vault
+geminiApiKey: ""

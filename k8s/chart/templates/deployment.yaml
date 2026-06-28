@@ -27,7 +27,7 @@ spec:
       serviceAccountName: llm-service-sa
       containers:
       - name: web-app
-        image: "{{ .Values.acrLoginServer }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        image: "{{ if .Values.acrLoginServer }}{{ .Values.acrLoginServer }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         ports:
         - containerPort: 8080
@@ -41,6 +41,13 @@ spec:
           value: "gemini-api-key"
         - name: MODEL_NAME
           value: "gemini-2.5-flash"
+        {{- if .Values.geminiApiKey }}
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gemini-api-key-secret
+              key: api-key
+        {{- end }}
         
         # Security Context
         securityContext:
