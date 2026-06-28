@@ -184,7 +184,7 @@ resource "helm_release" "argocd_apps" {
     yamlencode({
       applications = {
         aks-learning-app = {
-          namespace = "default"
+          namespace = "argocd"
           project   = "default"
           source = {
             repoURL        = "https://github.com/didiberman/practical-aks.git"
