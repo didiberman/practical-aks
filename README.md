@@ -481,43 +481,27 @@ To move from `audit` to `block` mode:
 
 ---
 
-## Activating the Full GitOps Pipeline
+## The GitOps Pipeline (ArgoCD)
 
-The `plan_and_apply` job in `tf-ci-cd.yml` is ready to uncomment. To enable it:
+This project uses a GitOps workflow to manage application deployments. **ArgoCD** is automatically provisioned and configured on first deploy:
 
-**1. Create a Service Principal for GitHub**
+1. **ArgoCD Server:** Installed via the `argo-cd` Helm chart into the `argocd` namespace.
+2. **ArgoCD Application Configuration:** Deployed via the `argocd-apps` Helm chart. It configures ArgoCD to sync the application state with the `k8s/chart` directory in this GitHub repository (`https://github.com/didiberman/practical-aks.git`).
+3. **Dynamic Value Injection:** Since we cannot hardcode cluster-specific outputs (like Key Vault URI or Managed Identity Client ID) in Git, Terraform automatically injects them as Helm parameters in the ArgoCD Application definition.
 
-```bash
-az ad sp create-for-rbac \
-  --name "github-aks-deploy" \
-  --role Contributor \
-  --scopes /subscriptions/<SUBSCRIPTION_ID> \
-  --sdk-auth
-```
-
-**2. Add GitHub Secrets**
-
-| Secret | Value |
-|---|---|
-| `AZURE_CLIENT_ID` | `appId` from the SP output |
-| `AZURE_TENANT_ID` | `tenant` from the SP output |
-| `AZURE_SUBSCRIPTION_ID` | your subscription ID |
-
-**3. Configure a Remote Backend** (required for team use)
-
-```hcl
-# Add to versions.tf before uncommenting plan_and_apply
-terraform {
-  backend "azurerm" {
-    resource_group_name  = "tfstate-rg"
-    storage_account_name = "tfstate<unique>"
-    container_name       = "tfstate"
-    key                  = "aks-learn.tfstate"
-  }
-}
-```
-
-**4. Uncomment the job** in `.github/workflows/tf-ci-cd.yml`
+### Accessing ArgoCD
+To open the ArgoCD dashboard:
+1. Port-forward the ArgoCD service:
+   ```bash
+   kubectl port-forward service/argocd-server -n argocd 8080:443
+   ```
+2. Open `https://localhost:8080` in your browser.
+3. Login using:
+   * **Username:** `admin`
+   * **Password:** Retrieve the auto-generated password (the server pod name) by running:
+     ```bash
+     kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
+     ```
 
 ---
 
@@ -570,10 +554,7 @@ Ideas for taking this further, ordered by difficulty:
 ## Tearing Down
 
 ```bash
-# Remove the K8s resources first (so Azure doesn't fight over managed resources)
-kubectl delete -f k8s/
-
-# Destroy all Azure infrastructure
+# Destroy all Azure infrastructure and Helm releases (ArgoCD and applications)
 terraform destroy
 ```
 
@@ -587,8 +568,8 @@ terraform destroy
 aks/
 ├── .github/
 │   └── workflows/
-│       ├── tf-ci-cd.yml        # Terraform format + validate + (plan/apply)
-│       └── app-ci-cd.yml       # MLOps tests + K8s manifest scan + image build + CVE scan
+│       ├── tf-ci-cd.yml        # Terraform format + validate (local plan/apply only)
+│       └── app-ci-cd.yml       # MLOps tests + K8s config scan + image build + CVE scan
 ├── app/
 │   ├── Dockerfile              # Multi-stage, non-root, Alpine
 │   ├── index.js                # Express LLM proxy, Workload Identity secret fetch
@@ -598,13 +579,17 @@ aks/
 │   └── test/
 │       └── prompt.test.js      # Jest unit tests for prompt formatting
 ├── k8s/
-│   ├── deployment.yaml         # ServiceAccount + Deployment with security context
-│   └── service.yaml            # ClusterIP service
-├── main.tf                     # All Azure resources (VNet, AKS, KV, ACR, Identities)
+│   ├── chart/                  # Helm chart used by ArgoCD and deploy.sh
+│   │   ├── Chart.yaml          # Chart metadata
+│   │   ├── values.yaml         # Default parameters
+│   │   └── templates/          # Templates (deployment, service)
+│   ├── deployment.yaml         # (Deprecated) Static deployment manifest
+│   └── service.yaml            # (Deprecated) Static service manifest
+├── main.tf                     # Azure resources, Helm providers, ArgoCD setup
 ├── variables.tf                # Parameterised inputs
 ├── outputs.tf                  # Cluster name, KV URI, ACR server, etc.
 ├── versions.tf                 # Provider pinning
-└── deploy.sh                   # End-to-end provisioning + deploy script
+└── deploy.sh                   # End-to-end provisioning + Helm deploy script
 ```
 
 ---
