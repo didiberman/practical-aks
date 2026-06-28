@@ -139,3 +139,90 @@ resource "azurerm_role_assignment" "aks_acr_pull" {
   skip_service_principal_aad_check = true
 }
 
+# 11. Kubernetes and Helm Providers Configuration
+provider "kubernetes" {
+  host                   = azurerm_kubernetes_cluster.aks.kube_config.0.host
+  client_certificate     = base64decode(azurerm_kubernetes_cluster.aks.kube_config.0.client_certificate)
+  client_key             = base64decode(azurerm_kubernetes_cluster.aks.kube_config.0.client_key)
+  cluster_ca_certificate = base64decode(azurerm_kubernetes_cluster.aks.kube_config.0.cluster_ca_certificate)
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = azurerm_kubernetes_cluster.aks.kube_config.0.host
+    client_certificate     = base64decode(azurerm_kubernetes_cluster.aks.kube_config.0.client_certificate)
+    client_key             = base64decode(azurerm_kubernetes_cluster.aks.kube_config.0.client_key)
+    cluster_ca_certificate = base64decode(azurerm_kubernetes_cluster.aks.kube_config.0.cluster_ca_certificate)
+  }
+}
+
+# 12. Bootstrap ArgoCD via Helm
+resource "helm_release" "argocd" {
+  name             = "argocd"
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argo-cd"
+  version          = "7.1.3"
+  namespace        = "argocd"
+  create_namespace = true
+
+  set {
+    name  = "configs.params.server\\.insecure"
+    value = "true"
+  }
+}
+
+# 13. Deploy the application via ArgoCD Apps Helm chart
+resource "helm_release" "argocd_apps" {
+  name             = "argocd-apps"
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argocd-apps"
+  version          = "2.0.1"
+  namespace        = "argocd"
+  create_namespace = true
+
+  values = [
+    yamlencode({
+      applications = {
+        aks-learning-app = {
+          namespace = "default"
+          project   = "default"
+          source = {
+            repoURL        = "https://github.com/didiberman/practical-aks.git"
+            targetRevision = "main"
+            path           = "k8s/chart"
+            helm = {
+              parameters = [
+                {
+                  name  = "appIdentityClientId"
+                  value = azurerm_user_assigned_identity.app_identity.client_id
+                },
+                {
+                  name  = "keyVaultUri"
+                  value = azurerm_key_vault.kv.vault_uri
+                },
+                {
+                  name  = "acrLoginServer"
+                  value = azurerm_container_registry.acr.login_server
+                }
+              ]
+            }
+          }
+          destination = {
+            server    = "https://kubernetes.default.svc"
+            namespace = "default"
+          }
+          syncPolicy = {
+            automated = {
+              prune    = true
+              selfHeal = true
+            }
+            syncOptions = ["CreateNamespace=true"]
+          }
+        }
+      }
+    })
+  ]
+
+  depends_on = [helm_release.argocd]
+}
+

@@ -18,29 +18,19 @@ echo "Active ACR: $ACR_NAME ($ACR_LOGIN_SERVER)"
 echo "App Client ID: $APP_IDENTITY_CLIENT_ID"
 echo "Key Vault URI: $KEY_VAULT_URI"
 
-echo "=== 3. Logging into Azure Container Registry (ACR) ==="
-az acr login --name "$ACR_NAME"
-
-echo "=== 4. Building & Pushing Docker Image ==="
-# Build using the ACR login server tag
-docker build -t "$ACR_LOGIN_SERVER/aks-learning-app:latest" ./app
-docker push "$ACR_LOGIN_SERVER/aks-learning-app:latest"
+echo "=== 3. Building & Pushing Image Keylessly in the Cloud (Azure Container Registry Tasks) ==="
+# Uses Azure's managed cloud builders - no local Docker daemon required!
+az acr build --registry "$ACR_NAME" --image aks-learning-app:latest ./app
 
 echo "=== 5. Fetching AKS Credentials ==="
 az aks get-credentials --resource-group "$RG_NAME" --name "$CLUSTER_NAME" --overwrite-existing
 
-echo "=== 6. Substituting Manifest Placeholders & Deploying ==="
-# Replace placeholders and create a temporary deployment manifest
-sed -e "s|<APP_IDENTITY_CLIENT_ID>|${APP_IDENTITY_CLIENT_ID}|g" \
-    -e "s|<KEY_VAULT_URI>|${KEY_VAULT_URI}|g" \
-    -e "s|akslearning.azurecr.io|${ACR_LOGIN_SERVER}|g" \
-    k8s/deployment.yaml > k8s/deployment_templated.yaml
-
-# Apply the templated deployment and service manifests
-kubectl apply -f k8s/deployment_templated.yaml -f k8s/service.yaml
-
-# Clean up the templated manifest
-rm k8s/deployment_templated.yaml
+echo "=== 6. Deploying via Helm ==="
+helm upgrade --install aks-learning-app ./k8s/chart \
+    --namespace default \
+    --set appIdentityClientId="${APP_IDENTITY_CLIENT_ID}" \
+    --set keyVaultUri="${KEY_VAULT_URI}" \
+    --set acrLoginServer="${ACR_LOGIN_SERVER}"
 
 echo "=== 7. Provisioning and Deployment Complete! ==="
 echo ""

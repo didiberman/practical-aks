@@ -35,32 +35,5 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
-  # The following job is a template for the deployment phase.
-  # In a production environment, you would configure Azure credentials using GitHub Secrets & OIDC.
-  # plan_and_apply:
-  #   name: "Terraform Plan & Apply"
-  #   needs: validate
-  #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Checkout Code
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Azure Login (OIDC)
-  #       uses: azure/login@v2
-  #       with:
-  #         client-id: ${{ secrets.AZURE_CLIENT_ID }}
-  #         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-  #         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-  #
-  #     - name: Setup Terraform
-  #       uses: hashicorp/setup-terraform@v3
-  #
-  #     - name: Terraform Init
-  #       run: terraform init
-  #
-  #     - name: Terraform Plan
-  #       run: terraform plan -out=tfplan
-  #
-  #     - name: Terraform Apply
-  #       run: terraform apply -auto-approve tfplan
+  # NOTE: Infrastructure deployment is strictly performed from the local administrator workstation.
+  # Do not add automated "terraform apply" steps to this workflow.

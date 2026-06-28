@@ -1,0 +1,11 @@
+replicaCount: 2
+
+image:
+  repository: aks-learning-app
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# These values will be dynamically injected by Terraform / ArgoCD or can be overridden manually
+appIdentityClientId: ""
+keyVaultUri: ""
+acrLoginServer: "akslearning.azurecr.io"
